@@ -3,7 +3,7 @@ import streamlit as st
 import io, contextlib, os, tempfile, uuid, shutil
 from pathlib import Path
 
-# IMPORTANT: your attached snippet should be saved as pyterm.py in the same folder
+# Import your terminal from main.py
 import main as pyterm_mod
 from main import PyTerm
 
@@ -18,59 +18,60 @@ def init_session():
     base_dir.mkdir(parents=True, exist_ok=True)
     st.session_state.base_dir = base_dir
 
-    # Instantiate PyTerm (do not call run())
+    # Instantiate your terminal (do NOT call run())
     term = PyTerm()
-    term.cwd = base_dir.resolve()  # start inside sandbox
+    term.cwd = base_dir.resolve()
     st.session_state.term = term
 
-    # Console buffer [(label, text), ...]
+    # UI console buffer
     st.session_state.console = []
 
-    # By default, do not auto-confirm destructive prompts
+    # Controls
     st.session_state.auto_confirm = False
-    st.session_state.strict_sandbox = False  # flip to True to enforce path jail
+    st.session_state.strict_sandbox = False  # flip ON to confine to sandbox
 
-    # Patch confirm() so interactive prompts don’t block Streamlit
+    # If your code has a confirm() helper, patch it so delete prompts don’t block
     def confirm_stub(prompt: str) -> bool:
-        # Use the checkbox as the policy for confirmations (e.g., rm without -f)
         return bool(st.session_state.get('auto_confirm', False))
-    pyterm_mod.confirm = confirm_stub
+    if hasattr(pyterm_mod, "confirm"):
+        pyterm_mod.confirm = confirm_stub
 
-    # Optional: Strictly sandbox path expansions to base_dir only
-    # This prevents absolute paths from escaping the sandbox root.
+    # Optional: strictly sandbox safe_expand() if your code exposes it
+    def _fallback_expand(path: str) -> Path:
+        return Path(os.path.expandvars(os.path.expanduser(path)))
+
+    def _default_expand(path: str) -> Path:
+        if hasattr(pyterm_mod, "safe_expand"):
+            return pyterm_mod.safe_expand(path)
+        return _fallback_expand(path)
+
     def safe_expand_sandboxed(path: str) -> Path:
-        # Defer strictness to UI checkbox
+        # When strict sandbox is OFF, use your normal expansion
         if not st.session_state.get('strict_sandbox', False):
-            return pyterm_mod.safe_expand(path)  # fall back to original behavior
+            return _default_expand(path)
 
-        # When strict sandbox is ON:
+        # When strict sandbox is ON, force all paths under base_dir
         raw = os.path.expandvars(os.path.expanduser(path))
         p = Path(raw)
-
-        # If absolute, strip root to make it relative, else keep relative
         if p.is_absolute():
-            # Convert "/etc/passwd" -> "etc/passwd"
-            p = Path(str(p).lstrip(os.sep))
-
+            p = Path(str(p).lstrip(os.sep))  # strip leading "/" to keep inside sandbox
         target = (st.session_state.base_dir / p).resolve()
-
-        # Disallow directory traversal outside base_dir
         base_resolved = st.session_state.base_dir.resolve()
         if not str(target).startswith(str(base_resolved)):
             return base_resolved
         return target
 
-    # Replace module-level safe_expand (PyTerm uses it everywhere)
-    pyterm_mod.safe_expand = safe_expand_sandboxed
+    if hasattr(pyterm_mod, "safe_expand"):
+        pyterm_mod.safe_expand = safe_expand_sandboxed
 
 init_session()
 term = st.session_state.term
 
 st.title("PyTerm (Streamlit)")
-st.write("Type shell-like commands (pwd, ls, cd, mkdir, rm, mv, cp, touch, cat, which, history).")
-st.write("Natural language via: ai \"create folder test and list\"")
+st.write("Enter commands like: pwd, ls, cd, mkdir, rm, mv, cp, touch, cat, which, history.")
+st.write('Natural language (if your code supports it): ai "create folder demo and list"')
 
-# Controls
+# Sidebar controls
 with st.sidebar:
     st.header("Session")
     st.caption(f"Sandbox: {st.session_state.base_dir}")
@@ -91,16 +92,16 @@ st.caption(f"Current directory: {term.cwd}")
 
 # Command form
 with st.form("cmd_form", clear_on_submit=True):
-    cmd = st.text_input("Command", placeholder="ls -l  |  ai \"create folder demo and list\"")
+    cmd = st.text_input("Command", placeholder='ls -l  |  ai "create folder demo and list"')
     submitted = st.form_submit_button("Run")
     if submitted and cmd.strip():
-        # Special-case clear to wipe UI console
         if cmd.strip() in ("clear", "cls"):
             st.session_state.console = []
         else:
             buf_out, buf_err = io.StringIO(), io.StringIO()
+            rc = 0
             try:
-                # Keep process cwd in sync before dispatch (as in PyTerm.run)
+                # Keep process cwd in sync (mirrors typical CLI behavior)
                 os.chdir(term.cwd)
                 with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
                     rc = term.dispatch(cmd)
@@ -113,14 +114,15 @@ with st.form("cmd_form", clear_on_submit=True):
                 err = buf_err.getvalue()
                 text = out + (("\n" + err) if err else "")
                 if not text.strip():
-                    text = f"[exit code {locals().get('rc', 0)}]"
+                    text = f"[exit code {rc}]"
                 st.session_state.console.append((f"$ {cmd}", text))
 
-                # Append to history file (like PyTerm.run)
+                # Append to history file if your class exposes it
                 try:
-                    term.history_path.parent.mkdir(parents=True, exist_ok=True)
-                    with term.history_path.open("a", encoding="utf-8") as f:
-                        f.write(cmd + "\n")
+                    if hasattr(term, "history_path"):
+                        term.history_path.parent.mkdir(parents=True, exist_ok=True)
+                        with term.history_path.open("a", encoding="utf-8") as f:
+                            f.write(cmd + "\n")
                 except Exception:
                     pass
 
@@ -129,11 +131,11 @@ for label, text in st.session_state.console[-300:]:
     st.markdown(f"**{label}**")
     st.code(text.rstrip(), language="")
 
-# Quick viewer of last 20 history lines
+# Quick history viewer
 with st.expander("History (last 20)"):
     try:
         lines = []
-        if term.history_path.exists():
+        if hasattr(term, "history_path") and term.history_path.exists():
             lines = term.history_path.read_text(encoding="utf-8", errors="ignore").splitlines()
         start = max(0, len(lines) - 20)
         for i, line in enumerate(lines[start:], start=start + 1):
