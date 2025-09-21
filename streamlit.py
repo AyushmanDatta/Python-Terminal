@@ -4,8 +4,8 @@ import io, contextlib, os, tempfile, uuid, shutil
 from pathlib import Path
 
 # IMPORTANT: your attached snippet should be saved as pyterm.py in the same folder
-import pyterm as pyterm_mod
-from pyterm import PyTerm
+import main as pyterm_mod
+from main import PyTerm
 
 def init_session():
     if 'initialized' in st.session_state:
